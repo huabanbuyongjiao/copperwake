@@ -1,134 +1,48 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
-
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
-
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
-
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
+// Copperwake: a compact, procedural port-city crime adventure.
+const canvas=document.querySelector('#game'),ctx=canvas.getContext('2d');
+const ui=document.querySelector('#ui'),menu=document.querySelector('#menu'),toast=document.querySelector('#toast');
+let W=innerWidth,H=innerHeight,dpr=1;function resize(){dpr=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;canvas.width=W*dpr;canvas.height=H*dpr;canvas.style.width=W+'px';canvas.style.height=H+'px';ctx.setTransform(dpr,0,0,dpr,0,0)}addEventListener('resize',resize);resize();
+const TAU=Math.PI*2, city={w:2400,h:1900}, roads=[380,780,1180,1580,1980];
+let keys={},mouse={x:0,y:0,down:false},game=null,last=performance.now(),toastTimer=0,mapBig=false,audio=null;
+const missions=[['WHARF PICKUP','Collect the sealed copper crate at Assay Wharf.','crate'],['NIGHT DELIVERY','Deliver the crate to the Lantern Slope workshop.','drop'],['A LOUD MESSAGE','Shake the Iron Quay warehouse crew.','warehouse'],['CHECKPOINT RUN','Lose the tail beyond Kilnbridge.','escape']];
+function fresh(){return {x:245,y:1410,face:0,vx:0,vy:0,hp:100,cash:450,wanted:0,heat:0,car:-1,weapon:0,mission:0,objective:0,clock:0,peds:[],cars:[],police:[],props:[],lastCrime:0,arrest:0,crate:false,stats:{}}}
+function initWorld(){const g=fresh();for(let i=0;i<70;i++){let axis=i%2, lane=roads[1+Math.floor(Math.random()*3)],p=80+Math.random()*1700;g.cars.push({x:axis?lane:p,y:axis?p:lane,a:axis?Math.PI/2:0,s:35+Math.random()*40,pol:false,color:['#b4523e','#d2a23c','#4f8585','#d7d1bd','#53606d'][i%5],park:i<9})}for(let i=0;i<90;i++){let x=80+Math.random()*2200,y=80+Math.random()*1700;if(!nearRoad(x,y))g.peds.push({x,y,a:Math.random()*TAU,s:13+Math.random()*17,panic:0,shirt:['#e7b468','#80aaa1','#d8795c','#afa4c7','#cad2cb'][i%5]})}return g}
+function nearRoad(x,y){return roads.some(r=>Math.abs(x-r)<95||Math.abs(y-r)<95)}
+function begin(load){let old;try{old=JSON.parse(localStorage.getItem('copperwake-save'))}catch{}game=initWorld();if(load&&old)Object.assign(game,old);menu.classList.add('hidden');ui.classList.remove('hidden');toastMsg('COPPERWAKE — the tide is turning.');audioOn();last=performance.now()}
+function save(){if(!game)return;let s={};for(const k of ['x','y','face','hp','cash','wanted','heat','car','weapon','mission','objective','clock','crate'])s[k]=game[k];try{localStorage.setItem('copperwake-save',JSON.stringify(s));toastMsg('Progress saved locally.')}catch{toastMsg('Save unavailable in this browser.')}}
+function toastMsg(s){toast.textContent=s;toast.classList.add('show');toastTimer=3}
+function audioOn(){if(audio)return;try{audio=new(window.AudioContext||window.webkitAudioContext)();const o=audio.createOscillator(),gain=audio.createGain();o.type='triangle';o.frequency.value=55;gain.gain.value=.025;o.connect(gain).connect(audio.destination);o.start();let lfo=audio.createOscillator(),lg=audio.createGain();lfo.frequency.value=.13;lg.gain.value=7;lfo.connect(lg).connect(o.frequency);lfo.start()}catch{}}
+function crime(n=1){game.wanted=Math.min(5,Math.max(1,game.wanted+n));game.heat=25;game.lastCrime=game.clock;toastMsg('Police alert — keep moving!')}
+function objective(){const m=missions[game.mission];return game.mission>=4?'Free roam — the copper tide is yours.':m[1]}
+function interact(){if(!game)return;let nearest=game.cars.findIndex(c=>Math.hypot(c.x-game.x,c.y-game.y)<56);if(game.car<0&&nearest>=0){const c=game.cars[nearest];game.car=nearest;c.park=true;c.s=0;if(!c.owned){crime();c.owned=true}toastMsg('Vehicle acquired. WASD drive · Space handbrake.');return}if(game.car>=0){game.car=-1;return}const p=missionTarget();if(p&&Math.hypot(p.x-game.x,p.y-game.y)<75){if(game.mission===0){game.crate=true;game.mission=1;toastMsg('Crate secured. Take it to Lantern Slope.')}else if(game.mission===1){game.crate=false;game.mission=2;game.cash+=600;toastMsg('Delivery complete · $600. Warehouse next.')}else if(game.mission===2){game.mission=3;game.wanted=Math.max(game.wanted,2);game.heat=28;toastMsg('Warehouse crew scattered. Checkpoint is closing.')}else if(game.mission===3&&game.wanted===0){game.mission=4;game.cash+=1200;toastMsg('You lost them. The city knows your name. +$1,200.')}}}
+function missionTarget(){return [[2160,1430],[250,260],[1480,780],[600,330]][game.mission]&&{x:[[2160,1430],[250,260],[1480,780],[600,330]][game.mission][0],y:[[2160,1430],[250,260],[1480,780],[600,330]][game.mission][1]}}
+function fire(){if(!game)return;const target=game.peds.find(p=>Math.hypot(p.x-game.x,p.y-game.y)<180);if(target){target.panic=8;target.hp=(target.hp||1)-1;crime();if(target.hp<=0)game.peds.splice(game.peds.indexOf(target),1);game.cash=Math.max(0,game.cash-25)}else{game.weapon=1;toastMsg('A bottle clatters across the stones.')};}
+function update(dt){if(!game)return;game.clock+=dt;if(toastTimer>0){toastTimer-=dt;if(toastTimer<=0)toast.classList.remove('show')}
+ let f=(keys.w||keys.ArrowUp?1:0)-(keys.s||keys.ArrowDown?1:0),side=(keys.d||keys.ArrowRight?1:0)-(keys.a||keys.ArrowLeft?1:0);if(game.car>=0){let c=game.cars[game.car];if(f)c.s=Math.max(-150,Math.min(260,c.s+f*260*dt));else c.s*=Math.pow(.2,dt);if(keys[' '])c.s*=Math.pow(.005,dt);c.a+=(side||0)*dt*(c.s<0?-1:1)*1.8;c.x+=Math.cos(c.a)*c.s*dt;c.y+=Math.sin(c.a)*c.s*dt;if(!nearRoad(c.x,c.y))c.s*=.98;for(const p of game.peds)if(Math.hypot(p.x-c.x,p.y-c.y)<32&&Math.abs(c.s)>65){p.panic=8;crime();c.s*=.72}game.x=c.x;game.y=c.y;game.face=c.a}
+ else{let speed=(keys.Shift?235:150),n=Math.hypot(side,f)||1;game.x+=side/n*speed*dt;game.y-=f/n*speed*dt;if(side||f)game.face=Math.atan2(-f,side)}game.x=Math.max(25,Math.min(city.w-25,game.x));game.y=Math.max(25,Math.min(city.h-25,game.y));
+ for(const c of game.cars){if(c.park||c===game.cars[game.car])continue;c.x+=Math.cos(c.a)*c.s*dt;c.y+=Math.sin(c.a)*c.s*dt;if(c.x<0)c.x=city.w;if(c.x>city.w)c.x=0;if(c.y<0)c.y=city.h;if(c.y>city.h)c.y=0}
+ for(const p of game.peds){if(p.panic>0){p.panic-=dt;let a=Math.atan2(p.y-game.y,p.x-game.x);p.x+=Math.cos(a)*100*dt;p.y+=Math.sin(a)*100*dt}else if(Math.random()<.01)p.a+=(Math.random()-.5)*1.5;if(Math.random()<.7){p.x+=Math.cos(p.a)*p.s*dt;p.y+=Math.sin(p.a)*p.s*dt}if(!nearRoad(p.x,p.y)){let r=roads.reduce((a,b)=>Math.abs(b-p.x)<Math.abs(a-p.x)?b:a,roads[0]);p.x+=(r-p.x)*dt*.5}}
+ if(game.wanted>0){if(game.clock-game.lastCrime>20&&!game.police.some(p=>Math.hypot(p.x-game.x,p.y-game.y)<360))game.heat-=dt;if(game.heat<=0){game.wanted=Math.max(0,game.wanted-dt*.18);if(game.wanted===0)game.police=[]}if(game.police.length<game.wanted*2&&Math.random()<dt*.5){let a=Math.random()*TAU;game.police.push({x:game.x+Math.cos(a)*430,y:game.y+Math.sin(a)*430,a:0})}for(const p of game.police){p.a=Math.atan2(game.y-p.y,game.x-p.x);p.x+=Math.cos(p.a)*115*dt;p.y+=Math.sin(p.a)*115*dt;if(Math.hypot(p.x-game.x,p.y-game.y)<34){game.hp-=13*dt;game.heat=Math.max(game.heat,5);if(game.hp<=0)busted()}}}
+ if(game.mission===3&&game.wanted===0&&Math.hypot(game.x-600,game.y-330)<80)interact();if(game.mission===0&&Math.hypot(game.x-2160,game.y-1430)<42)toast.textContent='F — pick up the sealed crate';if(game.mission===1&&Math.hypot(game.x-250,game.y-260)<42)toast.textContent='F — deliver the copper crate';if(game.mission===2&&Math.hypot(game.x-1480,game.y-780)<42)toast.textContent='F — make your entrance';
 }
-
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
-}
-
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
-
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
-
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
-    }
-    renderer.draw(world.state, screen, best);
-  }
-
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Block Dodger. Press Space or click to start.');
-  requestAnimationFrame(frame);
-}
-
-if (shot) runShot(shot);
-else runGame();
+function busted(){game.hp=100;game.cash=Math.max(0,game.cash-300);game.wanted=0;game.heat=0;game.police=[];game.car=-1;game.x=245;game.y=1410;toastMsg('BUSTED · $300 impound fee. Back at the ferry steps.')}
+function worldDraw(){let camx=game?game.x:1200,camy=game?game.y:950,zoom=1;ctx.fillStyle='#273b3d';ctx.fillRect(0,0,W,H);ctx.save();ctx.translate(W/2-camx,H/2-camy);
+ // Harbor water and docks
+ ctx.fillStyle='#172d37';ctx.fillRect(1780,0,620,1900);for(let i=0;i<26;i++){ctx.strokeStyle=`rgba(117,173,170,${.08+Math.sin(game?.clock*1.1+i)*.025})`;ctx.beginPath();ctx.moveTo(1800,40+i*74);ctx.lineTo(2390,40+i*74);ctx.stroke()}
+ // blocks and roads: original grid with copper-toned architecture
+ for(let x=0;x<city.w;x+=400)for(let y=0;y<city.h;y+=400){ctx.fillStyle=(Math.floor(x/400+y/400)%2?'#58615a':'#687064');ctx.fillRect(x+18,y+18,364,364);for(let b=0;b<4;b++){let bx=x+40+(b%2)*165,by=y+42+Math.floor(b/2)*165;ctx.fillStyle=['#a65f47','#84775f','#b28458','#64716b'][Math.floor((x+y+b*31)/7)%4];ctx.fillRect(bx,by,136,130);ctx.fillStyle='#c39a6a';ctx.fillRect(bx+12,by+12,112,3);ctx.fillStyle='#d2ae72';for(let q=0;q<6;q++){ctx.fillRect(bx+15+(q%3)*35,by+36+Math.floor(q/3)*35,11,14)}ctx.fillStyle='#4b5550';ctx.fillRect(bx+55,by+115,25,15)}}
+ for(let x=0;x<city.w;x+=400){ctx.fillStyle='#343b3c';ctx.fillRect(x-40,0,80,city.h);ctx.fillStyle='#8d7655';for(let y=0;y<city.h;y+=54){ctx.fillRect(x-2,y,4,24)}}for(let y=0;y<city.h;y+=400){ctx.fillStyle='#343b3c';ctx.fillRect(0,y-40,city.w,80);ctx.fillStyle='#8d7655';for(let x=0;x<city.w;x+=54)ctx.fillRect(x,y-2,24,4)}
+ // district landmarks
+ const label=(x,y,t)=>{ctx.font='bold 15px Georgia';ctx.textAlign='center';ctx.fillStyle='rgba(240,206,151,.75)';ctx.fillText(t,x,y)};label(350,200,'LANTERN SLOPE');label(1350,210,'KILNBRIDGE');label(350,1100,'VERDIGRIS ROW');label(1470,1120,'SMELTER YARD');label(2110,900,'ASSAY WHARF');
+ // harbor cranes, foundry stacks
+ for(let x of [1945,2110,2280]){ctx.fillStyle='#4d5552';ctx.fillRect(x,980,14,330);ctx.fillRect(x-95,1000,205,9);ctx.strokeStyle='#bea06a';ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(x-90,1005);ctx.lineTo(x-32,1100);ctx.stroke()}for(let x of [1260,1340,1420]){ctx.fillStyle='#794f43';ctx.fillRect(x,700,36,185);ctx.fillStyle='#343d3b';ctx.fillRect(x+8,682,20,20);ctx.fillStyle='rgba(234,143,92,.2)';ctx.beginPath();ctx.arc(x+18,680,65,0,TAU);ctx.fill()}
+ if(game){for(const p of game.peds){ctx.fillStyle=p.panic>0?'#e7c76a':p.shirt;ctx.beginPath();ctx.arc(p.x,p.y,7,0,TAU);ctx.fill();ctx.fillStyle='#292a28';ctx.fillRect(p.x-4,p.y+5,8,8)}for(const c of game.cars){if(c===game.cars[game.car]){}ctx.save();ctx.translate(c.x,c.y);ctx.rotate(c.a);ctx.fillStyle=c.pol?'#ddd6c4':c.color;ctx.fillRect(-20,-10,40,20);ctx.fillStyle=c.pol?'#334e66':'#293435';ctx.fillRect(-6,-8,13,16);if(c.pol){ctx.fillStyle='#dc6652';ctx.fillRect(-3,-13,8,4)}ctx.restore()}for(const p of game.police){ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.a);ctx.fillStyle='#d8d4c3';ctx.fillRect(-19,-10,38,20);ctx.fillStyle='#2b5870';ctx.fillRect(-5,-8,10,16);ctx.fillStyle='#f25547';ctx.fillRect(-3,-13,7,4);ctx.restore()}
+ let target=missionTarget();if(target){ctx.strokeStyle='#f3c36a';ctx.lineWidth=3;ctx.beginPath();ctx.arc(target.x,target.y,18+Math.sin(game.clock*4)*4,0,TAU);ctx.stroke();ctx.fillStyle='#f3c36a';ctx.beginPath();ctx.arc(target.x,target.y,5,0,TAU);ctx.fill()}
+ ctx.save();ctx.translate(game.x,game.y);ctx.rotate(game.face);ctx.fillStyle='#ead7ad';ctx.fillRect(-9,-7,18,14);ctx.fillStyle='#293b3b';ctx.fillRect(2,-3,9,6);ctx.restore()}
+ ctx.restore();ctx.fillStyle='rgba(31,26,22,.22)';ctx.fillRect(0,0,W,H);const vg=ctx.createRadialGradient(W*.5,H*.45,Math.min(W,H)*.14,W*.5,H*.5,Math.max(W,H)*.7);vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(8,13,17,.52)');ctx.fillStyle=vg;ctx.fillRect(0,0,W,H)}
+function hud(){if(!game)return;document.querySelector('#health').textContent='♥ '+Math.ceil(game.hp);document.querySelector('#cash').textContent='$'+Math.floor(game.cash).toLocaleString();document.querySelector('#stars').textContent='★'.repeat(Math.ceil(game.wanted))+'☆'.repeat(5-Math.ceil(game.wanted));document.querySelector('#objective').innerHTML=`<b>${game.mission<4?missions[game.mission][0]:'OPEN CITY'}</b><br>${objective()}`;const m=document.querySelector('#map'),c=m.getContext('2d');c.clearRect(0,0,140,140);c.fillStyle='#172f38';c.fillRect(0,0,140,140);c.fillStyle='#424847';for(let r of roads){c.fillRect(r/city.w*140-2,0,4,140);c.fillRect(0,r/city.h*140-2,140,4)}c.fillStyle='#d9a159';let t=missionTarget();if(t){c.beginPath();c.arc(t.x/city.w*140,t.y/city.h*140,3,0,TAU);c.fill()}for(let car of game.cars){c.fillStyle='#c17756';c.fillRect(car.x/city.w*140,car.y/city.h*140,2,2)}for(let p of game.police){c.fillStyle='#f45548';c.fillRect(p.x/city.w*140-2,p.y/city.h*140-2,4,4)}c.fillStyle='#fff0ce';c.beginPath();c.arc(game.x/city.w*140,game.y/city.h*140,3,0,TAU);c.fill();if(mapBig)m.classList.add('big');else m.classList.remove('big')}
+function frame(now){let dt=Math.min((now-last)/1000,.05);last=now;if(game)update(dt);worldDraw();if(game)hud();requestAnimationFrame(frame)}requestAnimationFrame(frame);
+addEventListener('keydown',e=>{let k=e.key.toLowerCase();keys[k]=true;if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(k))e.preventDefault();if(k==='escape'){if(!game){menu.classList.remove('hidden');return}document.querySelector('#pause').classList.toggle('hidden');if(!document.querySelector('#pause').classList.contains('hidden'))save()}if(k==='e')interact();if(k==='f')interact();if(k==='m')mapBig=!mapBig;if(k===' '&&game&&game.car<0)game.y-=12});addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);canvas.addEventListener('mousemove',e=>{mouse.x=e.clientX;mouse.y=e.clientY;if(game&&game.car<0){game.face=Math.atan2(e.clientY-H/2,e.clientX-W/2)}});canvas.addEventListener('mousedown',()=>{mouse.down=true;if(game)fire()});addEventListener('mouseup',()=>mouse.down=false);
+document.querySelector('#new').onclick=()=>{document.querySelector('#pause').classList.add('hidden');begin(false)};document.querySelector('#continue').onclick=()=>begin(true);document.querySelector('#resume').onclick=()=>document.querySelector('#pause').classList.add('hidden');document.querySelector('#save').onclick=save;document.querySelector('#quit').onclick=()=>{save();game=null;ui.classList.add('hidden');document.querySelector('#pause').classList.add('hidden');menu.classList.remove('hidden')};try{if(localStorage.getItem('copperwake-save'))document.querySelector('#continue').classList.remove('disabled')}catch{}
+// Screenshot staging uses the live game scene and its normal renderer.
+const shotMode=new URLSearchParams(location.search).get('shot');if(shotMode&&shotMode!=='cover'){begin(false);if(shotMode==='drive'){game.x=game.cars[3].x;game.y=game.cars[3].y;game.car=3;game.cars[3].a=0;game.cars[3].s=95;game.mission=1;game.crate=true}else if(shotMode==='wanted'){game.wanted=3;game.heat=25;game.lastCrime=game.clock;game.mission=2;game.police=[{x:game.x+250,y:game.y,a:Math.PI},{x:game.x-210,y:game.y-120,a:0}]}else if(shotMode==='street'){game.x=780;game.y=780;game.mission=0}}

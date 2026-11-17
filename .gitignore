@@ -1,3 +1,4 @@
+# Local build and operating-system artifacts
 out/
 .DS_Store
 node_modules/
